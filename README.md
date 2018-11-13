@@ -29,7 +29,9 @@ used to get the state associated with the component of an
 entity, 'add' and 'rmv' are used to add and remove entities
 from the list of entities a service acts on, and 'swap' swaps
 the order in which services are executed when 'update' is
-called. There are no other functions.
+called. There are no other functions. (Well, besides the
+'reset' function which you should only call in the most dire
+of circumstances, like major error recovery)
 
 When any of the four 'init's are called, they return the new
 object. These objects are numbers, but are related to each

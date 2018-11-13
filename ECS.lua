@@ -1,22 +1,22 @@
 local function erase(relations, key)
-	for _, links in next(relations[key]) do
+	for _, links in next, relations[key] do
 		links[key] = nil
 	end
 	relations[key] = nil
 end
 
-local entityToServices = {}
-local entityToStates = {}
-local stateToEntity = {}
-local stateToComponent = {}
-local stateToData = {}
-local componentToStates = {}
-local componentToInit = {}
-local componentToFree = {}
-local serviceToEntities = {}
-local serviceToUpdate = {}
-local serviceToOrder = {}
-local orderToService = {}
+local entityToServices
+local entityToStates
+local stateToEntity
+local stateToComponent
+local stateToData
+local componentToStates
+local componentToInit
+local componentToFree
+local serviceToEntities
+local serviceToUpdate
+local serviceToOrder
+local orderToService
 
 local curService
 local addEntities
@@ -35,8 +35,17 @@ end
 
 -- errors if the entity DNE or is already freed
 function ECS.entity_free(entity)
-	erase(entityToStates, entity)
-	erase(entityToServices, entity)
+	local free = ECS.state_free
+	for component, state in next, entityToStates[entity] do
+		free(state)
+	end
+	entityToStates[entity] = nil
+
+	local rmv = ECS.service_rmv
+	for service in next, entityToServices[entity] do
+		rmv(service, entity)
+	end
+	entityToServices[entity] = nil
 end
 
 -- errors if the entity or component DNE or have been freed
@@ -56,17 +65,6 @@ function ECS.state_init(entity, component, ...)
 	stateToEntity[state] = entity
 	stateToData[state] = componentToInit[component](...)
 	return state
-end
-
--- cannot produce errors
-function ECS.state_set(state, data)
-	stateToData[state] = data
-end
-
--- errors if the state DNE or has been freed,
--- including when the component or entity has been freed
-function ECS.state_get(component, entity)
-	return stateToData[componentToStates[component][entity]]
 end
 
 -- errors if the state DNE or is already freed
@@ -94,11 +92,21 @@ function ECS.component_init(init, free)
 	return component
 end
 
+-- errors if the component DNE or has been freed
+function ECS.component_get(component, entity)
+	return componentToStates[component][entity]
+end
+
 -- errors if the component DNE or is already freed
 function ECS.component_free(component)
 	componentToInit[component] = nil
 	componentToFree[component] = nil
-	erase(componentToStates, component)
+
+	local free = ECS.state_free
+	for entity, state in next, componentToStates[component] do
+		free(state)
+	end
+	componentToStates[component] = nil
 end
 
 -- cannot produce errors
@@ -158,7 +166,10 @@ function ECS.service_free(service)
 	orderToService[order] = nil
 	serviceToOrder[service] = nil
 	serviceToUpdate[service] = nil
-	erase(serviceToEntities, service)
+	for entity in next, serviceToEntities[service] do	
+		serviceToEntities[service][entity] = nil
+		entityToServices[entity][service] = nil
+	end
 end
 
 -- errors if a service's update callback is not a function
@@ -186,6 +197,41 @@ function ECS.update()
 			end
 		end
 	end
+end
+
+-- the big red button your mom told you to never push
+-- cannot error, cannot be undone.
+function ECS.reset()
+	entityToServices = {}
+	entityToStates = {}
+	stateToEntity = {}
+	stateToComponent = {}
+	stateToData = {}
+	componentToStates = {}
+	componentToInit = {}
+	componentToFree = {}
+	serviceToEntities = {}
+	serviceToUpdate = {}
+	serviceToOrder = {}
+	orderToService = {}
+
+	curService = nil
+	addEntities = nil
+	rmvEntities = nil
+	updated = nil
+
+	ECS.stateToData = stateToData
+end
+
+ECS.reset()
+
+local interface = newproxy(true)
+local metatable = getmetatable(interface)
+metatable.__metatable = 'This metatable is locked'
+metatable.__index = ECS
+local newindexMsg = 'Attempt to set %s to %s on a locked table'
+function metatable:__newindex(key, value)
+	return error(newindexMsg:format(tostring(key), tostring(value)))
 end
 
 return ECS
