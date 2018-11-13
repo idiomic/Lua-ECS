@@ -18,6 +18,11 @@ local serviceToUpdate = {}
 local serviceToOrder = {}
 local orderToService = {}
 
+local curService
+local addEntities
+local rmvEntities
+local updated
+
 local ECS = {}
 
 -- cannot produce errors
@@ -51,6 +56,17 @@ function ECS.state_init(entity, component, ...)
 	stateToEntity[state] = entity
 	stateToData[state] = componentToInit[component](...)
 	return state
+end
+
+-- cannot produce errors
+function ECS.state_set(state, data)
+	stateToData[state] = data
+end
+
+-- errors if the state DNE or has been freed,
+-- including when the component or entity has been freed
+function ECS.state_get(component, entity)
+	return stateToData[componentToStates[component][entity]]
 end
 
 -- errors if the state DNE or is already freed
@@ -99,15 +115,27 @@ function ECS.service_init(update)
 end
 
 -- errors if the service or entity DNE or have been freed
+-- waits until the service is done updating to add the entities
 function ECS.service_add(service, entity)
-	serviceToEntities[service][entity] = true
-	entityToServices[entity][service] = true
+	if curService == service then
+		updated = true
+		addEntities[#addEntities + 1] = entity
+	else
+		serviceToEntities[service][entity] = true
+		entityToServices[entity][service] = true
+	end
 end
 
 -- errors if the service or entity DNE or have been freed
+-- waits until the service is done updating to remove the entities
 function ECS.service_rmv(service, entity)
-	serviceToEntities[service][entity] = nil
-	entityToServices[entity][service] = nil
+	if curService == service then
+		updated = true
+		rmvEntities[#addEntities + 1] = entity
+	else
+		serviceToEntities[service][entity] = nil
+		entityToServices[entity][service] = nil
+	end
 end
 
 -- erros if a service DNE or has been freed
@@ -122,6 +150,9 @@ function ECS.service_swap(service_1, service_2)
 end
 
 -- errors if the service or entity DNE or have been freed
+-- will cause services with a higher order not to update
+-- to avoid this, swap service orders around ans desired
+-- before calling this
 function ECS.service_free(service)
 	local order = serviceToOrder[service]
 	orderToService[order] = nil
@@ -131,11 +162,28 @@ function ECS.service_free(service)
 end
 
 -- errors if a service's update callback is not a function
+-- or if any service's update throws an error
 function ECS.update()
 	for order, service in ipairs(orderToService) do
 		local update = serviceToUpdate[service]
+
+		curService = service
+		updated = false
+
 		for entity in next, serviceToEntities[service] do
 			update(entity)
+		end
+
+		if updated then
+			curService = nil
+
+			for i, entity in ipairs(addEntities) do
+				ECS.service_add(service, entity)
+			end
+
+			for i, entity in ipairs(rmvEntities) do
+				ECS.service_rmv(service, entity)
+			end
 		end
 	end
 end
