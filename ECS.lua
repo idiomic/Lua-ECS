@@ -10,9 +10,11 @@ local entityToStates
 local stateToEntity
 local stateToComponent
 local stateToData
+local nameToComponent
 local componentToStates
 local componentToInit
 local componentToFree
+local nameToService
 local serviceToEntities
 local serviceToUpdate
 local serviceToOrder
@@ -50,26 +52,39 @@ end
 
 -- errors if the entity or component DNE or have been freed
 -- or the component's init callback is not a function
-function ECS.state_init(entity, component, ...)
+function ECS.init(entity, name, ...)
+	local component = nameToComponent[name]
+	local data = componentToInit[component](entity, ...)
+	
 	local state = componentToStates[component][entity]
-	if state then
-		stateToData[state] = componentToInit[component](...)
-		return state
+	if data == nil then
+		if state then
+			ECS.free(entity, name)
+		end
+		return
+	elseif not state then
+		state = #stateToComponent + 1
+		componentToStates[component][entity] = state
+		entityToStates[entity][component] = state
+	
+		stateToComponent[state] = component
+		stateToEntity[state] = entity
 	end
 
-	state = #stateToComponent + 1
-	componentToStates[component][entity] = state
-	entityToStates[entity][component] = state
-
-	stateToComponent[state] = component
-	stateToEntity[state] = entity
-	stateToData[state] = componentToInit[component](...)
+	stateToData[state] = data
 	return state
 end
 
+-- errors if the component DNE or has been freed
+function ECS.get(entity, name)
+	return stateToData[componentToStates[nameToComponent[name]][entity]]
+end
+
 -- errors if the state DNE or is already freed
--- or the component's free callback is not a function
-function ECS.state_free(state)
+-- or the component DNE or its free callback is not a function
+function ECS.free(entity, name)
+	local state = componentToStates[nameToComponent[name]][entity]
+
 	local entity = stateToEntity[state]
 	local component = stateToComponent[state]
 	componentToStates[component][entity] = nil
@@ -84,21 +99,20 @@ end
 
 -- cannot produce errors
 -- can cause state_init and state_free to error if init and free are not callbacks
-function ECS.component_init(init, free)
+function ECS.component_init(name, init, free)
 	local component = #componentToInit + 1
 	componentToStates[component] = {}
 	componentToInit[component] = init
 	componentToFree[component] = free
+	nameToComponent[name] = component
 	return component
 end
 
--- errors if the component DNE or has been freed
-function ECS.component_get(component, entity)
-	return componentToStates[component][entity]
-end
-
 -- errors if the component DNE or is already freed
-function ECS.component_free(component)
+function ECS.component_free(name)
+	local component = nameToComponent[name]
+	nameToComponent[name] = nil
+
 	componentToInit[component] = nil
 	componentToFree[component] = nil
 
@@ -111,10 +125,11 @@ end
 
 -- cannot produce errors
 -- can cause update to error if update isn't a callback
-function ECS.service_init(update)
+function ECS.service_init(name, update)
 	local service = #serviceToEntities + 1
 	serviceToEntities[service] = {}
 	serviceToUpdate[service] = update
+	nameToService[name] = service
 
 	local order = #orderToService + 1
 	orderToService[order] = service
@@ -124,7 +139,8 @@ end
 
 -- errors if the service or entity DNE or have been freed
 -- waits until the service is done updating to add the entities
-function ECS.service_add(service, entity)
+function ECS.add(entity, name)
+	local service = nameToService[name]
 	if curService == service then
 		updated = true
 		addEntities[#addEntities + 1] = entity
@@ -136,10 +152,11 @@ end
 
 -- errors if the service or entity DNE or have been freed
 -- waits until the service is done updating to remove the entities
-function ECS.service_rmv(service, entity)
+function ECS.rmv(entity, name)
+	local service = nameToService[name]
 	if curService == service then
 		updated = true
-		rmvEntities[#addEntities + 1] = entity
+		rmvEntities[#rmvEntities + 1] = entity
 	else
 		serviceToEntities[service][entity] = nil
 		entityToServices[entity][service] = nil
@@ -147,7 +164,9 @@ function ECS.service_rmv(service, entity)
 end
 
 -- erros if a service DNE or has been freed
-function ECS.service_swap(service_1, service_2)
+function ECS.service_swap(name_1, name_2)
+	local service_1 = nameToService[name_1]
+	local service_2 = nameToService[name_2]
 	local order_1 = serviceToOrder[service_1]
 	local order_2 = serviceToOrder[service_2]
 	serviceToOrder[service_1] = order_2
@@ -159,13 +178,17 @@ end
 
 -- errors if the service or entity DNE or have been freed
 -- will cause services with a higher order not to update
--- to avoid this, swap service orders around ans desired
+-- to avoid this, swap service orders around as desired
 -- before calling this
-function ECS.service_free(service)
+function ECS.service_free(name)
+	local service = nameToService[name]
+	nameToService[name] = nil
+
 	local order = serviceToOrder[service]
 	orderToService[order] = nil
 	serviceToOrder[service] = nil
 	serviceToUpdate[service] = nil
+
 	for entity in next, serviceToEntities[service] do	
 		serviceToEntities[service][entity] = nil
 		entityToServices[entity][service] = nil
@@ -175,12 +198,14 @@ end
 -- errors if a service's update callback is not a function
 -- or if any service's update throws an error
 function ECS.update()
-	for order, service in ipairs(orderToService) do
-		local update = serviceToUpdate[service]
+	addEntities = {}
+	rmvEntities = {}
 
+	for order, service in ipairs(orderToService) do
 		curService = service
 		updated = false
 
+		local update = serviceToUpdate[service]
 		for entity in next, serviceToEntities[service] do
 			update(entity)
 		end
@@ -189,12 +214,17 @@ function ECS.update()
 			curService = nil
 
 			for i, entity in ipairs(addEntities) do
-				ECS.service_add(service, entity)
+				serviceToEntities[service][entity] = true
+				entityToServices[entity][service] = true
 			end
 
 			for i, entity in ipairs(rmvEntities) do
-				ECS.service_rmv(service, entity)
+				serviceToEntities[service][entity] = nil
+				entityToServices[entity][service] = nil
 			end
+			
+			addEntities = {}
+			rmvEntities = {}
 		end
 	end
 end
@@ -207,9 +237,11 @@ function ECS.reset()
 	stateToEntity = {}
 	stateToComponent = {}
 	stateToData = {}
+	nameToComponent = {}
 	componentToStates = {}
 	componentToInit = {}
 	componentToFree = {}
+	nameToService = {}
 	serviceToEntities = {}
 	serviceToUpdate = {}
 	serviceToOrder = {}
