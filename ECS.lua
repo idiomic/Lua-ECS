@@ -1,10 +1,4 @@
-local function erase(relations, key)
-	for _, links in next, relations[key] do
-		links[key] = nil
-	end
-	relations[key] = nil
-end
-
+local nameToAssembly
 local entityToServices
 local entityToStates
 local stateToEntity
@@ -19,13 +13,17 @@ local serviceToEntities
 local serviceToUpdate
 local serviceToOrder
 local orderToService
-
-local curService
-local addEntities
-local rmvEntities
-local updated
+local serviceToMessages
 
 local ECS = {}
+
+function ECS.assembly_init(name, assembly)
+	nameToAssembly[name] = assembly
+end
+
+function ECS.assembly_free(name)
+	nameToAssembly[name] = nil
+end
 
 -- cannot produce errors
 function ECS.entity_init()
@@ -37,32 +35,43 @@ end
 
 -- errors if the entity DNE or is already freed
 function ECS.entity_free(entity)
-	local free = ECS.state_free
+	local free = ECS.free
 	for component, state in next, entityToStates[entity] do
-		free(state)
+		componentToStates[component][state] = nil
+		
+		local free = componentToFree[component]
+		if free then
+			free(stateToData[state])
+		end
+
+		stateToComponent[state] = nil
+		stateToEntity[state] = nil
+		stateToData[state] = nil
 	end
 	entityToStates[entity] = nil
 
-	local rmv = ECS.service_rmv
+	local rmv = ECS.rmv
 	for service in next, entityToServices[entity] do
-		rmv(service, entity)
+		serviceToEntities[service][entity] = nil
 	end
 	entityToServices[entity] = nil
 end
 
--- errors if the entity or component DNE or have been freed
--- or the component's init callback is not a function
+-- errors if the entity DNE or has been freed
 function ECS.init(entity, name, ...)
 	local component = nameToComponent[name]
-	local data = componentToInit[component](entity, ...)
-	
-	local state = componentToStates[component][entity]
-	if data == nil then
-		if state then
-			ECS.free(entity, name)
+	if not component then
+		local assembly = nameToAssembly[name]
+		if assembly then
+			assembly(entity, ...)
+		else
+			warn 'Attempt to call init with a non-existant component/assembly'
 		end
 		return
-	elseif not state then
+	end
+	
+	local state = componentToStates[component][entity]
+	if not state then
 		state = #stateToComponent + 1
 		componentToStates[component][entity] = state
 		entityToStates[entity][component] = state
@@ -71,7 +80,7 @@ function ECS.init(entity, name, ...)
 		stateToEntity[state] = entity
 	end
 
-	stateToData[state] = data
+	stateToData[state] = componentToInit[component](entity, ...) or ...
 	return state
 end
 
@@ -89,12 +98,15 @@ function ECS.free(entity, name)
 	local component = stateToComponent[state]
 	componentToStates[component][entity] = nil
 	entityToStates[entity][component] = nil
-
-	local data = stateToData[state]
+	
+	local free = componentToFree[component]
+	if free then
+		free(stateToData[state])
+	end
+	
 	stateToComponent[state] = nil
 	stateToEntity[state] = nil
 	stateToData[state] = nil
-	componentToFree[component](data)
 end
 
 -- cannot produce errors
@@ -141,26 +153,16 @@ end
 -- waits until the service is done updating to add the entities
 function ECS.add(entity, name)
 	local service = nameToService[name]
-	if curService == service then
-		updated = true
-		addEntities[#addEntities + 1] = entity
-	else
-		serviceToEntities[service][entity] = true
-		entityToServices[entity][service] = true
-	end
+	serviceToEntities[service][entity] = true
+	entityToServices[entity][service] = true
 end
 
 -- errors if the service or entity DNE or have been freed
 -- waits until the service is done updating to remove the entities
 function ECS.rmv(entity, name)
 	local service = nameToService[name]
-	if curService == service then
-		updated = true
-		rmvEntities[#rmvEntities + 1] = entity
-	else
-		serviceToEntities[service][entity] = nil
-		entityToServices[entity][service] = nil
-	end
+	serviceToEntities[service][entity] = nil
+	entityToServices[entity][service] = nil
 end
 
 -- erros if a service DNE or has been freed
@@ -198,40 +200,15 @@ end
 -- errors if a service's update callback is not a function
 -- or if any service's update throws an error
 function ECS.update()
-	addEntities = {}
-	rmvEntities = {}
-
 	for order, service in ipairs(orderToService) do
-		curService = service
-		updated = false
-
-		local update = serviceToUpdate[service]
-		for entity in next, serviceToEntities[service] do
-			update(entity)
-		end
-
-		if updated then
-			curService = nil
-
-			for i, entity in ipairs(addEntities) do
-				serviceToEntities[service][entity] = true
-				entityToServices[entity][service] = true
-			end
-
-			for i, entity in ipairs(rmvEntities) do
-				serviceToEntities[service][entity] = nil
-				entityToServices[entity][service] = nil
-			end
-			
-			addEntities = {}
-			rmvEntities = {}
-		end
+		serviceToUpdate[service](serviceToEntities[service])
 	end
 end
 
 -- the big red button your mom told you to never push
 -- cannot error, cannot be undone.
 function ECS.reset()
+	nameToAssembly = {}
 	entityToServices = {}
 	entityToStates = {}
 	stateToEntity = {}
@@ -246,13 +223,6 @@ function ECS.reset()
 	serviceToUpdate = {}
 	serviceToOrder = {}
 	orderToService = {}
-
-	curService = nil
-	addEntities = nil
-	rmvEntities = nil
-	updated = nil
-
-	ECS.stateToData = stateToData
 end
 
 ECS.reset()
@@ -261,7 +231,7 @@ local interface = newproxy(true)
 local metatable = getmetatable(interface)
 metatable.__metatable = 'This metatable is locked'
 metatable.__index = ECS
-local newindexMsg = 'Attempt to set %s to %s on a locked table'
+local newindexMsg = 'Attempt to set [%s] to (%s) on a locked table'
 function metatable:__newindex(key, value)
 	return error(newindexMsg:format(tostring(key), tostring(value)))
 end
