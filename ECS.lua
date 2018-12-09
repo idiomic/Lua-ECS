@@ -236,4 +236,4 @@ function metatable:__newindex(key, value)
 	return error(newindexMsg:format(tostring(key), tostring(value)))
 end
 
-return ECS
+return interface
